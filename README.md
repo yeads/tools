@@ -63,6 +63,38 @@ provided, the arguments are also passed to `wget` unchanged, so you can use
 > distinguish the name from the file path. In this case, use a tag without `/`
 > or a commit hash.
 
+## gptdump.py
+
+`gptdump.py` downloads a public ChatGPT shared conversation and saves it as a
+Markdown file. It preserves headings, lists, tables, code blocks, links, and
+image references, and converts ChatGPT citation and entity annotations into
+readable Markdown.
+
+Run it with a public `chatgpt.com/share` URL:
+
+```bash
+python3 gptdump.py \
+  'https://chatgpt.com/share/6aa79994-820c-83e9-a91c-592e2dbd70a4'
+```
+
+By default, the output filename is based on the conversation title. Use `-o`
+to choose a path:
+
+```bash
+python3 gptdump.py SHARE_URL -o conversation.md
+```
+
+The script automatically honors the standard `http_proxy` and `https_proxy`
+environment variables. A proxy can also be provided explicitly:
+
+```bash
+python3 gptdump.py SHARE_URL --proxy http://127.0.0.1:7890
+```
+
+Existing files are not overwritten unless `--force` is used with `-o`. Use
+`--timeout SECONDS` to change the default 30-second request timeout, or run
+`python3 gptdump.py --help` to see all options.
+
 ## dnspod.py
 
 `dnspod.py` manages DNS records hosted by Tencent Cloud DNSPod. It can create or
