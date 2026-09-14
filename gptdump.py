@@ -10,6 +10,7 @@ import json
 import math
 import re
 import sys
+from html import escape
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
@@ -286,6 +287,15 @@ def message_markdown(message: dict[str, Any]) -> str:
     return clean_annotations(text, message.get("metadata") or {})
 
 
+def right_aligned_markdown_block(text: str) -> str:
+    """Render a user prompt as a visibly right-aligned Markdown code block."""
+    return (
+        '<pre align="right"><code class="language-markdown">'
+        f"{escape(text)}\n"
+        "</code></pre>"
+    )
+
+
 def conversation_to_markdown(conversation: dict[str, Any]) -> str:
     title = conversation.get("title", "").strip()
     output: list[str] = [f"# {title}", ""] if title else []
@@ -300,9 +310,9 @@ def conversation_to_markdown(conversation: dict[str, Any]) -> str:
         body = message_markdown(message)
         if not body:
             continue
-        output.extend(
-            ["##### You said:" if role == "user" else "###### ChatGPT said:", "", body, ""]
-        )
+        if role == "user":
+            body = right_aligned_markdown_block(body)
+        output.extend([body, ""])
 
     if not output:
         raise RuntimeError("the share contains no exportable user or assistant messages")
