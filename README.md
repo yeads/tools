@@ -97,9 +97,8 @@ Existing files are not overwritten unless `--force` is used with `-o`. Use
 
 ## dnspod.py
 
-`dnspod.py` manages DNS records hosted by Tencent Cloud DNSPod. It can create or
-update a record with `set`, query a hostname with `get`, list a domain with `ls`,
-and remove a record with `delete`.
+`dnspod.py` manages DNS records hosted by Tencent Cloud DNSPod. It supports
+`add`, `set`, `get`, `ls`, and `delete` operations.
 
 Set your Tencent Cloud credentials before use:
 
@@ -111,11 +110,28 @@ export TENCENTCLOUD_SECRET_KEY="your-secret-key"
 Then run commands such as:
 
 ```bash
-python3 dnspod.py set www.example.com 192.0.2.1
+python3 dnspod.py add www.example.com 192.0.2.1
 python3 dnspod.py get www.example.com
+python3 dnspod.py ls
 python3 dnspod.py ls example.com
-python3 dnspod.py delete www.example.com
+python3 dnspod.py set 123456789 192.0.2.2
+python3 dnspod.py rm 123456789 987654321
 ```
+
+`ls` without a domain lists account domains. `ls example.com` lists that domain's
+records with record IDs in the first column. `show` is an alias for `ls`.
+`add hostname value` creates a new
+record. `set id value` updates an existing record and preserves its other
+attributes unless options explicitly override them. `rm id [id ...]` deletes
+one or more records, including records across domains; `delete` and `del` are
+aliases. Duplicate IDs are deleted once. Deletion stops on the first error and
+reports IDs already deleted.
+
+DNSPod requires a domain for record updates and deletions, so the tool looks up
+IDs by listing account domains and their records. Credentials must allow these
+list operations as well as the requested update or deletion. Accounts with many
+domains may take longer to search. API fields follow the
+[official Tencent Cloud SDK](https://github.com/TencentCloud/tencentcloud-sdk-python/blob/master/tencentcloud/dnspod/v20210323/models.py).
 
 Use options such as `--type`, `--line`, `--line-id`, and `--ttl` to select or
 configure a record. Run `python3 dnspod.py --help` for all options. Temporary
@@ -123,8 +139,8 @@ credentials can also use `TENCENTCLOUD_SESSION_TOKEN`.
 
 ## alidns.py
 
-`alidns.py` manages DNS records hosted by Alibaba Cloud DNS. Like the DNSPod
-tool, it supports `set`, `get`, `ls`, and `delete` operations.
+`alidns.py` manages DNS records hosted by Alibaba Cloud DNS. It supports
+`add`, `set`, `get`, `ls`, and `delete` operations.
 
 Set your Alibaba Cloud credentials before use:
 
@@ -136,11 +152,22 @@ export ALIBABA_CLOUD_ACCESS_KEY_SECRET="your-access-key-secret"
 Then run commands such as:
 
 ```bash
-python3 alidns.py set www.example.com 192.0.2.1
+python3 alidns.py add www.example.com 192.0.2.1
 python3 alidns.py get www.example.com
+python3 alidns.py ls
 python3 alidns.py ls example.com
-python3 alidns.py delete www.example.com
+python3 alidns.py set 123456789 192.0.2.2
+python3 alidns.py rm 123456789 987654321
 ```
+
+`ls` without a domain lists account domains. `ls example.com` lists that domain's
+records with record IDs in the first column. `show` is an alias for `ls`.
+`add hostname value` creates a new
+record. `set id value` updates an existing record and preserves its type, route,
+TTL, and MX priority unless options explicitly override them. It reads the
+existing fields using [DescribeDomainRecordInfo](https://www.alibabacloud.com/help/en/dns/api-alidns-2015-01-09-describedomainrecordinfo).
+`rm id [id ...]` deletes one or more records; `delete` and `del` are aliases.
+Deletion stops on the first error and reports IDs already deleted.
 
 Use options such as `--type`, `--line`, and `--ttl` to select or configure a
 record. Run `python3 alidns.py --help` for all options. The aliases

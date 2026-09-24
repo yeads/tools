@@ -181,26 +181,55 @@ class DNSPodClient:
         ]
 
     def list_all_records(self, domain: str) -> List[Dict[str, Any]]:
-        response = self.call(
-            "DescribeRecordList",
-            {"Domain": domain, "Limit": 3000, "ErrorOnEmpty": "no"},
-        )
-        records = response.get("RecordList", [])
-        if not isinstance(records, list):
-            raise DNSPodError("DNSPod returned an invalid record list")
-        return records
+        records: List[Dict[str, Any]] = []
+        while True:
+            response = self.call(
+                "DescribeRecordList",
+                {"Domain": domain, "Offset": len(records), "Limit": 3000, "ErrorOnEmpty": "no"},
+            )
+            batch = response.get("RecordList", [])
+            if not isinstance(batch, list) or any(not isinstance(item, dict) for item in batch):
+                raise DNSPodError("DNSPod returned an invalid record list")
+            records.extend(batch)
+            if len(batch) < 3000:
+                return records
+
+    def list_domains(self) -> List[Dict[str, Any]]:
+        domains: List[Dict[str, Any]] = []
+        while True:
+            response = self.call(
+                "DescribeDomainList", {"Type": "ALL", "Offset": len(domains), "Limit": 3000}
+            )
+            batch = response.get("DomainList", [])
+            if not isinstance(batch, list) or any(not isinstance(item, dict) for item in batch):
+                raise DNSPodError("DNSPod returned an invalid domain list")
+            domains.extend(batch)
+            if len(batch) < 3000:
+                return domains
+
+    def find_records_by_id(
+        self, record_ids: Sequence[int]
+    ) -> Dict[int, Tuple[str, Dict[str, Any]]]:
+        pending = set(record_ids)
+        found: Dict[int, Tuple[str, Dict[str, Any]]] = {}
+        for item in self.list_domains():
+            domain = item.get("Name")
+            if not isinstance(domain, str) or not domain:
+                continue
+            for record in self.list_all_records(domain):
+                record_id = record.get("RecordId")
+                if record_id in pending:
+                    found[record_id] = (domain, record)
+                    pending.remove(record_id)
+            if not pending:
+                break
+        return found
 
     def resolve_hostname(self, hostname: str) -> Tuple[str, str]:
         """Find the longest account domain that contains the full hostname."""
-        response = self.call(
-            "DescribeDomainList", {"Type": "ALL", "Offset": 0, "Limit": 3000}
-        )
-        domains = response.get("DomainList", [])
-        if not isinstance(domains, list):
-            raise DNSPodError("DNSPod returned an invalid domain list")
         hostname_lower = hostname.lower()
         matches = []
-        for item in domains:
+        for item in self.list_domains():
             name = item.get("Name") if isinstance(item, dict) else None
             if not isinstance(name, str):
                 continue
@@ -223,40 +252,53 @@ class DNSPodClient:
         return self.call("DeleteRecord", {"Domain": domain, "RecordId": record_id})
 
 
-def _selector_options(parser: argparse.ArgumentParser) -> None:
+def _selector_options(parser: argparse.ArgumentParser, update: bool = False) -> None:
     parser.add_argument(
         "--type",
         dest="record_type",
-        default="A",
-        help="Record type, such as A, AAAA, CNAME, TXT, or MX (default: A)",
+        default=None if update else "A",
+        help="Record type, such as A, AAAA, CNAME, TXT, or MX "
+        + ("(unchanged when omitted)" if update else "(default: A)"),
     )
     parser.add_argument(
-        "--line", default=DEFAULT_LINE, help="DNS route name (default: provider default)"
+        "--line", default=None if update else DEFAULT_LINE,
+        help="DNS route name "
+        + ("(unchanged when omitted)" if update else "(default: provider default)"),
     )
     parser.add_argument("--line-id", help="DNS route ID; takes precedence over --line")
 
 
-def _record_options(parser: argparse.ArgumentParser) -> None:
-    _selector_options(parser)
+def _record_options(parser: argparse.ArgumentParser, update: bool = False) -> None:
+    _selector_options(parser, update=update)
     parser.add_argument(
-        "--ttl", type=int, default=600, help="TTL from 1 to 604800 (default: 600)"
+        "--ttl", type=int, default=None if update else 600,
+        help="TTL from 1 to 604800 "
+        + ("(unchanged when omitted)" if update else "(default: 600)"),
     )
     parser.add_argument(
         "--mx",
         type=int,
-        default=0,
-        help="MX/HTTPS/SVCB priority from 0 to 65535 (default: 0)",
+        default=None if update else 0,
+        help="MX/HTTPS/SVCB priority from 0 to 65535 "
+        + ("(unchanged when omitted)" if update else "(default: 0)"),
     )
     parser.add_argument(
-        "--weight", type=int, default=0, help="Weight from 0 to 100 (default: 0)"
+        "--weight", type=int, default=None if update else 0,
+        help="Weight from 0 to 100 "
+        + ("(unchanged when omitted)" if update else "(default: 0)"),
     )
     parser.add_argument(
         "--status",
         choices=("ENABLE", "DISABLE"),
-        default="ENABLE",
-        help="Record status (default: ENABLE)",
+        default=None if update else "ENABLE",
+        help="Record status "
+        + ("(unchanged when omitted)" if update else "(default: ENABLE)"),
     )
-    parser.add_argument("--remark", default="", help="Record remark (default: empty)")
+    parser.add_argument(
+        "--remark", default=None if update else "",
+        help="Record remark "
+        + ("(unchanged when omitted)" if update else "(default: empty)"),
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -272,43 +314,62 @@ def build_parser() -> argparse.ArgumentParser:
     )
     commands = parser.add_subparsers(dest="command", required=True)
 
-    set_command = commands.add_parser(
-        "set", help="Update an existing record or create it if absent"
-    )
-    _record_options(set_command)
-    set_command.add_argument("hostname", help="Full hostname, such as www.example.com")
+    add = commands.add_parser("add", help="Create a new record")
+    _record_options(add)
+    add.add_argument("hostname", help="Full hostname, such as www.example.com")
+    add.add_argument("value", help="Record value, such as 192.0.2.1")
+
+    set_command = commands.add_parser("set", help="Update an existing record by ID")
+    _record_options(set_command, update=True)
+    set_command.add_argument("record_id", metavar="id", type=int, help="Record ID from ls")
     set_command.add_argument("value", help="Record value, such as 192.0.2.1")
 
     delete = commands.add_parser(
-        "delete", aliases=("del", "rm"), help="Delete a record (aliases: del, rm)"
+        "delete", aliases=("del", "rm"), help="Delete records by ID (aliases: del, rm)"
     )
-    _selector_options(delete)
-    delete.add_argument("hostname", help="Full hostname to delete")
+    delete.add_argument("record_ids", metavar="id", type=int, nargs="+", help="Record IDs from ls")
 
     get = commands.add_parser("get", help="Query records for a hostname")
     _selector_options(get)
     get.add_argument("hostname", help="Full hostname to query")
 
     show = commands.add_parser(
-        "ls", aliases=("show",), help="List all records in a domain (alias: show)"
+        "ls", aliases=("show",), help="List account domains or records in a domain (alias: show)"
     )
-    show.add_argument("domain", help="Root domain, such as example.com")
+    show.add_argument(
+        "domain", nargs="?", help="Root domain, such as example.com; omit to list account domains"
+    )
     return parser
 
 
 def _validate(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
-    target_name = "domain" if args.command in {"ls", "show"} else "hostname"
-    target = getattr(args, target_name).strip().rstrip(".")
-    setattr(args, target_name, target)
-    if not target or "." not in target:
-        parser.error(f"{target_name} must be a valid domain name")
-    if hasattr(args, "record_type"):
+    if args.command in {"add", "get", "ls", "show"}:
+        target_name = "domain" if args.command in {"ls", "show"} else "hostname"
+        target = getattr(args, target_name)
+        if target is not None:
+            target = target.strip().rstrip(".")
+            setattr(args, target_name, target)
+            if not target or "." not in target:
+                parser.error(f"{target_name} must be a valid domain name")
+    if hasattr(args, "record_id") and args.record_id <= 0:
+        parser.error("record ID must be a positive integer")
+    if hasattr(args, "record_ids") and any(record_id <= 0 for record_id in args.record_ids):
+        parser.error("record IDs must be positive integers")
+    if getattr(args, "record_type", None) is not None:
         args.record_type = args.record_type.strip().upper()
-    if hasattr(args, "ttl") and not 1 <= args.ttl <= 604800:
+        if not args.record_type:
+            parser.error("--type cannot be empty")
+    for option in ("line", "line_id"):
+        if getattr(args, option, None) is not None:
+            value = getattr(args, option).strip()
+            if not value:
+                parser.error(f"--{option.replace('_', '-')} cannot be empty")
+            setattr(args, option, value)
+    if getattr(args, "ttl", None) is not None and not 1 <= args.ttl <= 604800:
         parser.error("--ttl must be between 1 and 604800")
-    if hasattr(args, "mx") and not 0 <= args.mx <= 65535:
+    if getattr(args, "mx", None) is not None and not 0 <= args.mx <= 65535:
         parser.error("--mx must be between 0 and 65535")
-    if hasattr(args, "weight") and not 0 <= args.weight <= 100:
+    if getattr(args, "weight", None) is not None and not 0 <= args.weight <= 100:
         parser.error("--weight must be between 0 and 100")
     if args.timeout <= 0:
         parser.error("--timeout must be greater than 0")
@@ -337,29 +398,54 @@ def _parameters(
     return result
 
 
-def _find_record_id(client: DNSPodClient, args: argparse.Namespace) -> Optional[int]:
-    records = client.list_records(
-        args.domain, args.name, args.record_type, args.line, args.line_id
-    )
-    if not records:
-        return None
-    if len(records) > 1:
-        ids = ", ".join(str(item.get("RecordId")) for item in records)
-        raise DNSPodError(
-            f"Multiple records matched (IDs: {ids}); specify --line or --line-id"
-        )
-    record_id = records[0].get("RecordId")
-    if not isinstance(record_id, int):
-        raise DNSPodError("The matching record has no valid RecordId")
-    return record_id
-
-
 def execute(client: DNSPodClient, args: argparse.Namespace) -> Dict[str, Any]:
     if args.command in {"ls", "show"}:
+        if args.domain is None:
+            return {"operation": "domains_listed", "domains": client.list_domains()}
         return {
             "operation": "listed",
             "domain": args.domain,
             "records": client.list_all_records(args.domain),
+        }
+
+    if args.command in {"delete", "del", "rm"}:
+        records = client.find_records_by_id(args.record_ids)
+        deleted = []
+        for record_id in dict.fromkeys(args.record_ids):
+            try:
+                if record_id not in records:
+                    raise DNSPodError("No matching record was found")
+                domain, _ = records[record_id]
+                client.delete_record(domain, record_id)
+            except DNSPodError as exc:
+                detail = f"Unable to delete record {record_id}: {exc}"
+                if deleted:
+                    detail += f"; already deleted: {', '.join(map(str, deleted))}"
+                raise DNSPodError(detail, exc.code, exc.request_id) from exc
+            deleted.append(record_id)
+        return {"operation": "deleted", "record_ids": deleted}
+
+    if args.command == "set":
+        records = client.find_records_by_id([args.record_id])
+        if args.record_id not in records:
+            raise DNSPodError(f"No matching record was found for ID {args.record_id}")
+        args.domain, record = records[args.record_id]
+        for field in ("Name", "Type", "Line", "TTL", "Status"):
+            if record.get(field) is None or str(record[field]) == "":
+                raise DNSPodError(f"The record response has no valid {field}")
+        args.name = record["Name"]
+        if args.line is None and args.line_id is None:
+            args.line_id = record.get("LineId")
+        for option, field in (
+            ("record_type", "Type"), ("line", "Line"), ("ttl", "TTL"),
+            ("mx", "MX"), ("weight", "Weight"), ("status", "Status"), ("remark", "Remark"),
+        ):
+            if getattr(args, option) is None:
+                setattr(args, option, record.get(field))
+        response = client.modify_record(_parameters(args, args.record_id))
+        return {
+            "operation": "modified", "record_id": args.record_id,
+            "request_id": response.get("RequestId"),
         }
 
     args.domain, args.name = client.resolve_hostname(args.hostname)
@@ -377,25 +463,10 @@ def execute(client: DNSPodClient, args: argparse.Namespace) -> Dict[str, Any]:
             ),
         }
 
-    record_id = _find_record_id(client, args)
-    if args.command in {"delete", "del", "rm"}:
-        if record_id is None:
-            raise DNSPodError("No matching record was found to delete")
-        response = client.delete_record(args.domain, record_id)
-        return {
-            "operation": "deleted",
-            "record_id": record_id,
-            "request_id": response.get("RequestId"),
-        }
-    if record_id is None:
-        response = client.create_record(_parameters(args))
-        operation = "created"
-    else:
-        response = client.modify_record(_parameters(args, record_id))
-        operation = "modified"
+    response = client.create_record(_parameters(args))
     return {
-        "operation": operation,
-        "record_id": response.get("RecordId", record_id),
+        "operation": "created",
+        "record_id": response.get("RecordId"),
         "request_id": response.get("RequestId"),
     }
 
@@ -416,8 +487,14 @@ def _pad_column(value: str, width: int) -> str:
     return value + " " * (width - _display_width(value))
 
 
+def _print_domains(domains: Sequence[Mapping[str, Any]]) -> None:
+    print("DOMAIN")
+    for domain in domains:
+        print(domain.get("Name", ""))
+
+
 def _print_records(domain: str, records: Sequence[Mapping[str, Any]]) -> None:
-    rows = [("TYPE", "NAME", "VALUE", "LINE", "TTL", "STATUS")]
+    rows = [("ID", "TYPE", "NAME", "VALUE", "LINE", "TTL", "STATUS")]
     for record in records:
         name = str(record.get("Name", ""))
         hostname = domain if name == "@" else f"{name}.{domain}"
@@ -425,6 +502,7 @@ def _print_records(domain: str, records: Sequence[Mapping[str, Any]]) -> None:
             tuple(
                 str(value)
                 for value in (
+                    record.get("RecordId", ""),
                     record.get("Type", ""),
                     hostname,
                     record.get("Value", ""),
@@ -481,7 +559,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(f"Error: {prefix}{exc}{suffix}", file=sys.stderr)
         return 1
 
-    if result["operation"] in {"fetched", "listed"}:
+    if result["operation"] == "domains_listed":
+        _print_domains(result["domains"])
+    elif result["operation"] in {"fetched", "listed"}:
         _print_records(result["domain"], result["records"])
     return 0
 

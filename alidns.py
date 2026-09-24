@@ -212,6 +212,9 @@ class AliDNSClient:
     def add_record(self, parameters: Mapping[str, Any]) -> Dict[str, Any]:
         return self.call("AddDomainRecord", parameters)
 
+    def get_record(self, record_id: str) -> Dict[str, Any]:
+        return self.call("DescribeDomainRecordInfo", {"RecordId": record_id})
+
     def update_record(self, parameters: Mapping[str, Any]) -> Dict[str, Any]:
         return self.call("UpdateDomainRecord", parameters)
 
@@ -226,24 +229,33 @@ def _integer(value: Any, default: int) -> int:
         return default
 
 
-def _selector_options(parser: argparse.ArgumentParser) -> None:
+def _selector_options(parser: argparse.ArgumentParser, update: bool = False) -> None:
     parser.add_argument(
         "--type",
         dest="record_type",
-        default="A",
-        help="Record type, such as A, AAAA, CNAME, TXT, or MX (default: A)",
+        default=None if update else "A",
+        help="Record type, such as A, AAAA, CNAME, TXT, or MX "
+        + ("(unchanged when omitted)" if update else "(default: A)"),
     )
-    parser.add_argument("--line", default="default", help="DNS route code (default: default)")
+    parser.add_argument(
+        "--line", default=None if update else "default",
+        help="DNS route code "
+        + ("(unchanged when omitted)" if update else "(default: default)"),
+    )
     parser.add_argument("--line-id", help="DNS route code; takes precedence over --line")
 
 
-def _record_options(parser: argparse.ArgumentParser) -> None:
-    _selector_options(parser)
+def _record_options(parser: argparse.ArgumentParser, update: bool = False) -> None:
+    _selector_options(parser, update=update)
     parser.add_argument(
-        "--ttl", type=int, default=600, help="TTL from 1 to 604800 (default: 600)"
+        "--ttl", type=int, default=None if update else 600,
+        help="TTL from 1 to 604800 "
+        + ("(unchanged when omitted)" if update else "(default: 600)"),
     )
     parser.add_argument(
-        "--mx", type=int, default=0, help="MX priority from 1 to 50"
+        "--mx", type=int, default=None if update else 0,
+        help="MX priority from 1 to 50"
+        + (" (unchanged when omitted)" if update else ""),
     )
     parser.add_argument(
         "--weight", type=int, default=None, help="DNS load-balancing weight from 1 to 100"
@@ -268,57 +280,84 @@ def build_parser() -> argparse.ArgumentParser:
     )
     commands = parser.add_subparsers(dest="command", required=True)
 
-    set_command = commands.add_parser(
-        "set", help="Update an existing record or create it if absent"
-    )
-    _record_options(set_command)
-    set_command.add_argument("hostname", help="Full hostname, such as www.example.com")
+    add = commands.add_parser("add", help="Create a new record")
+    _record_options(add)
+    add.add_argument("hostname", help="Full hostname, such as www.example.com")
+    add.add_argument("value", help="Record value, such as 192.0.2.1")
+
+    set_command = commands.add_parser("set", help="Update an existing record by ID")
+    _record_options(set_command, update=True)
+    set_command.add_argument("record_id", metavar="id", help="Record ID from ls")
     set_command.add_argument("value", help="Record value, such as 192.0.2.1")
 
     delete = commands.add_parser(
-        "delete", aliases=("del", "rm"), help="Delete a record (aliases: del, rm)"
+        "delete", aliases=("del", "rm"), help="Delete records by ID (aliases: del, rm)"
     )
-    _selector_options(delete)
-    delete.add_argument("hostname", help="Full hostname to delete")
+    delete.add_argument("record_ids", metavar="id", nargs="+", help="Record IDs from ls")
 
     get = commands.add_parser("get", help="Query records for a hostname")
     _selector_options(get)
     get.add_argument("hostname", help="Full hostname to query")
 
     show = commands.add_parser(
-        "ls", aliases=("show",), help="List all records in a domain (alias: show)"
+        "ls", aliases=("show",), help="List account domains or records in a domain (alias: show)"
     )
-    show.add_argument("domain", help="Root domain, such as example.com")
+    show.add_argument(
+        "domain", nargs="?", help="Root domain, such as example.com; omit to list account domains"
+    )
     return parser
 
 
 def _validate(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
-    target_name = "domain" if args.command in {"ls", "show"} else "hostname"
-    target = getattr(args, target_name).strip().rstrip(".")
-    setattr(args, target_name, target)
-    if not target or "." not in target:
-        parser.error(f"{target_name} must be a valid domain name")
+    if args.command in {"add", "get", "ls", "show"}:
+        target_name = "domain" if args.command in {"ls", "show"} else "hostname"
+        target = getattr(args, target_name)
+        if target is not None:
+            target = target.strip().rstrip(".")
+            setattr(args, target_name, target)
+            if not target or "." not in target:
+                parser.error(f"{target_name} must be a valid domain name")
+    if hasattr(args, "record_id"):
+        args.record_id = args.record_id.strip()
+        if not args.record_id:
+            parser.error("record ID cannot be empty")
+    if hasattr(args, "record_ids"):
+        args.record_ids = [record_id.strip() for record_id in args.record_ids]
+        if not all(args.record_ids):
+            parser.error("record IDs cannot be empty")
     if hasattr(args, "record_type"):
-        args.record_type = args.record_type.strip().upper()
-        args.line = (args.line_id or args.line).strip()
-        if not args.record_type:
+        if args.record_type is not None:
+            args.record_type = args.record_type.strip().upper()
+        args.line = args.line_id if args.line_id is not None else args.line
+        if args.line is not None:
+            args.line = args.line.strip()
+        if args.record_type == "":
             parser.error("--type cannot be empty")
-        if not args.line:
+        if args.line == "":
             parser.error("--line/--line-id cannot be empty")
-    if hasattr(args, "ttl") and not 1 <= args.ttl <= 604800:
-        parser.error("--ttl must be between 1 and 604800")
-    if hasattr(args, "mx"):
-        if args.record_type == "MX" and not 1 <= args.mx <= 50:
-            parser.error("MX records require --mx with a priority from 1 to 50")
-        if args.record_type != "MX" and args.mx != 0:
-            parser.error("--mx applies only to MX records")
-    if hasattr(args, "weight") and args.weight is not None:
-        if not 1 <= args.weight <= 100:
-            parser.error("--weight must be between 1 and 100")
-        if args.record_type not in {"A", "AAAA"}:
-            parser.error("--weight applies only to A or AAAA records")
+    try:
+        _validate_record_values(args)
+    except AliDNSError as exc:
+        parser.error(str(exc))
     if args.timeout <= 0:
         parser.error("--timeout must be greater than 0")
+
+
+def _validate_record_values(args: argparse.Namespace) -> None:
+    if getattr(args, "ttl", None) is not None and not 1 <= args.ttl <= 604800:
+        raise AliDNSError("--ttl must be between 1 and 604800")
+    if hasattr(args, "mx"):
+        if args.mx is not None and args.mx != 0 and not 1 <= args.mx <= 50:
+            raise AliDNSError("--mx must be between 1 and 50")
+        if args.record_type == "MX" and args.mx == 0:
+            raise AliDNSError("MX records require --mx with a priority from 1 to 50")
+        if args.record_type not in {None, "MX"} and args.mx not in {None, 0}:
+            raise AliDNSError("--mx applies only to MX records")
+    if hasattr(args, "weight") and args.weight is not None:
+        if not 1 <= args.weight <= 100:
+            raise AliDNSError("--weight must be between 1 and 100")
+        if args.record_type not in {None, "A", "AAAA"}:
+            raise AliDNSError("--weight applies only to A or AAAA records")
 
 
 def _record_parameters(
@@ -340,19 +379,6 @@ def _record_parameters(
     return result
 
 
-def _find_record_id(client: AliDNSClient, args: argparse.Namespace) -> Optional[str]:
-    records = client.list_records(args.domain, args.rr, args.record_type, args.line)
-    if not records:
-        return None
-    if len(records) > 1:
-        ids = ", ".join(str(item.get("RecordId")) for item in records)
-        raise AliDNSError(f"Multiple records matched (IDs: {ids}); specify --line")
-    record_id = records[0].get("RecordId")
-    if record_id is None or not str(record_id):
-        raise AliDNSError("The matching record has no valid RecordId")
-    return str(record_id)
-
-
 def _apply_record_extras(
     client: AliDNSClient, args: argparse.Namespace, record_id: str
 ) -> None:
@@ -370,7 +396,7 @@ def _apply_record_extras(
         client.call(
             "SetDNSSLBStatus",
             {
-                "SubDomain": f"{args.rr}.{args.domain}",
+                "SubDomain": args.domain if args.rr == "@" else f"{args.rr}.{args.domain}",
                 "DomainName": args.domain,
                 "Type": args.record_type,
                 "Line": args.line,
@@ -384,10 +410,45 @@ def _apply_record_extras(
 
 def execute(client: AliDNSClient, args: argparse.Namespace) -> Dict[str, Any]:
     if args.command in {"ls", "show"}:
+        if args.domain is None:
+            return {"operation": "domains_listed", "domains": client.list_domains()}
         return {
             "operation": "listed",
             "domain": args.domain,
             "records": client.list_all_records(args.domain),
+        }
+
+    if args.command in {"delete", "del", "rm"}:
+        deleted = []
+        for record_id in dict.fromkeys(args.record_ids):
+            try:
+                client.delete_record(record_id)
+            except AliDNSError as exc:
+                detail = f"Unable to delete record {record_id}: {exc}"
+                if deleted:
+                    detail += f"; already deleted: {', '.join(deleted)}"
+                raise AliDNSError(detail, exc.code, exc.request_id) from exc
+            deleted.append(record_id)
+        return {"operation": "deleted", "record_ids": deleted}
+
+    if args.command == "set":
+        record = client.get_record(args.record_id)
+        for field in ("DomainName", "RR", "Type", "TTL", "Line"):
+            if record.get(field) is None or str(record[field]) == "":
+                raise AliDNSError(f"The record response has no valid {field}")
+        args.domain, args.rr = record["DomainName"], record["RR"]
+        for option, field in (("record_type", "Type"), ("line", "Line"), ("ttl", "TTL")):
+            if getattr(args, option) is None:
+                setattr(args, option, record[field])
+        if args.mx is None:
+            args.mx = _integer(record.get("Priority"), 0) if args.record_type == "MX" else 0
+        _validate_record_values(args)
+        response = client.update_record(_record_parameters(args, args.record_id))
+        _apply_record_extras(client, args, args.record_id)
+        return {
+            "operation": "modified",
+            "record_id": args.record_id,
+            "request_id": response.get("RequestId"),
         }
 
     args.domain, args.rr = client.resolve_hostname(args.hostname)
@@ -400,30 +461,14 @@ def execute(client: AliDNSClient, args: argparse.Namespace) -> Dict[str, Any]:
             ),
         }
 
-    record_id = _find_record_id(client, args)
-    if args.command in {"delete", "del", "rm"}:
-        if record_id is None:
-            raise AliDNSError("No matching record was found to delete")
-        response = client.delete_record(record_id)
-        return {
-            "operation": "deleted",
-            "record_id": record_id,
-            "request_id": response.get("RequestId"),
-        }
-
-    if record_id is None:
-        response = client.add_record(_record_parameters(args))
-        operation = "created"
-        returned_id = response.get("RecordId")
-        if returned_id is None or not str(returned_id):
-            raise AliDNSError("The record was added, but the response has no RecordId")
-        record_id = str(returned_id)
-    else:
-        response = client.update_record(_record_parameters(args, record_id))
-        operation = "modified"
+    response = client.add_record(_record_parameters(args))
+    returned_id = response.get("RecordId")
+    if returned_id is None or not str(returned_id):
+        raise AliDNSError("The record was added, but the response has no RecordId")
+    record_id = str(returned_id)
     _apply_record_extras(client, args, record_id)
     return {
-        "operation": operation,
+        "operation": "created",
         "record_id": record_id,
         "request_id": response.get("RequestId"),
     }
@@ -444,8 +489,14 @@ def _pad_column(value: str, width: int) -> str:
     return value + " " * (width - _display_width(value))
 
 
+def _print_domains(domains: Sequence[Mapping[str, Any]]) -> None:
+    print("DOMAIN")
+    for domain in domains:
+        print(domain.get("DomainName", ""))
+
+
 def _print_records(domain: str, records: Sequence[Mapping[str, Any]]) -> None:
-    rows = [("TYPE", "NAME", "VALUE", "LINE", "TTL", "STATUS")]
+    rows = [("ID", "TYPE", "NAME", "VALUE", "LINE", "TTL", "STATUS")]
     for record in records:
         rr = str(record.get("RR", ""))
         hostname = domain if rr == "@" else f"{rr}.{domain}"
@@ -453,6 +504,7 @@ def _print_records(domain: str, records: Sequence[Mapping[str, Any]]) -> None:
             tuple(
                 str(value)
                 for value in (
+                    record.get("RecordId", ""),
                     record.get("Type", ""),
                     hostname,
                     record.get("Value", ""),
@@ -515,7 +567,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         suffix = f" (RequestId: {exc.request_id})" if exc.request_id else ""
         print(f"Error: {prefix}{exc}{suffix}", file=sys.stderr)
         return 1
-    if result["operation"] in {"fetched", "listed"}:
+    if result["operation"] == "domains_listed":
+        _print_domains(result["domains"])
+    elif result["operation"] in {"fetched", "listed"}:
         _print_records(result["domain"], result["records"])
     return 0
 
